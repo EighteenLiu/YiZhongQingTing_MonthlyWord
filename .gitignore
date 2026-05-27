@@ -1,0 +1,9 @@
+.idea/
+*.py[cod]
+__pycache__/
+.pytest_cache/
+
+monthly_report_system/.venv/
+monthly_report_system/temp/
+monthly_report_system/output/
+monthly_report_system/*.log

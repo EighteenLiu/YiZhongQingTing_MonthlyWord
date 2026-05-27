@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>可回收物交投点月报生成系统</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Microsoft YaHei", Arial, sans-serif;
+      color: #172033;
+      background: #f4f6f8;
+    }
+    main {
+      width: min(1180px, calc(100% - 48px));
+      margin: 28px auto 56px;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      line-height: 1.25;
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 18px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    button, .download {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      border: 0;
+      border-radius: 6px;
+      padding: 0 16px;
+      background: #1f6feb;
+      color: #fff;
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #e8eef8;
+      color: #1f3b63;
+    }
+    button:disabled {
+      background: #8792a2;
+      cursor: wait;
+    }
+    .panel {
+      background: #fff;
+      border: 1px solid #dde3ea;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 18px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    }
+    .messages { margin-bottom: 18px; }
+    .message {
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    .success {
+      background: #ecfdf5;
+      color: #065f46;
+      border: 1px solid #a7f3d0;
+    }
+    .error {
+      background: #fef2f2;
+      color: #991b1b;
+      border: 1px solid #fecaca;
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric {
+      border: 1px solid #e3e8ef;
+      border-radius: 6px;
+      padding: 12px;
+      background: #fbfcfd;
+    }
+    .metric span {
+      display: block;
+      color: #64748b;
+      font-size: 13px;
+    }
+    .metric strong {
+      display: block;
+      margin-top: 4px;
+      font-size: 22px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid #e5e7eb;
+      padding: 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f3f4f6; }
+    pre {
+      overflow: auto;
+      white-space: pre-wrap;
+      background: #101827;
+      color: #e5e7eb;
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 13px;
+    }
+    dialog {
+      width: min(860px, calc(100% - 32px));
+      max-height: min(760px, calc(100% - 32px));
+      border: 0;
+      border-radius: 8px;
+      padding: 0;
+      box-shadow: 0 20px 70px rgba(15, 23, 42, 0.28);
+    }
+    dialog::backdrop { background: rgba(15, 23, 42, 0.46); }
+    .modal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 18px 20px;
+      border-bottom: 1px solid #e5e7eb;
+    }
+    .modal-title {
+      margin: 0;
+      font-size: 19px;
+    }
+    .modal-body {
+      padding: 20px;
+      overflow: auto;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px 20px;
+    }
+    label {
+      display: block;
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 7px;
+    }
+    input {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid #cfd6e4;
+      border-radius: 6px;
+      padding: 7px 10px;
+      font-size: 14px;
+      background: #fff;
+    }
+    input[type="file"] { height: auto; }
+    .modal-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 10px;
+      margin-top: 20px;
+      padding-top: 16px;
+      border-top: 1px solid #e5e7eb;
+    }
+    .empty-state {
+      min-height: 220px;
+      display: grid;
+      place-items: center;
+      text-align: center;
+      color: #526174;
+    }
+    .empty-state strong {
+      display: block;
+      color: #172033;
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+    @media (max-width: 800px) {
+      main { width: calc(100% - 24px); }
+      .topbar { align-items: flex-start; flex-direction: column; }
+      .grid, .metrics { grid-template-columns: 1fr; }
+      dialog { width: calc(100% - 20px); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="topbar">
+      <h1>可回收物交投点月报生成系统</h1>
+      <div class="toolbar">
+        <button id="open-dialog" type="button">生成月报</button>
+        {% if result %}
+          <a class="download" href="{{ result.download_url }}">下载 Word</a>
+        {% endif %}
+      </div>
+    </div>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="messages">
+          {% for category, message in messages %}
+            <div class="message {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% if result %}
+      <section class="panel">
+        <h2>读取结果</h2>
+        <div class="metrics">
+          <div class="metric"><span>记录数</span><strong>{{ result.record_count }}</strong></div>
+          <div class="metric"><span>街道数</span><strong>{{ result.street_count }}</strong></div>
+          <div class="metric"><span>图片数</span><strong>{{ result.image_count }}</strong></div>
+          <div class="metric"><span>问题记录</span><strong>{{ result.problem_record_count }}</strong></div>
+        </div>
+        <p style="margin-top:14px;">输出文件：{{ result.output_path }}</p>
+      </section>
+
+      <section class="panel">
+        <h2>统计结果预览</h2>
+        <p>{{ result.summary_text }}</p>
+      </section>
+
+      <section class="panel">
+        <h2>字段映射预览</h2>
+        <pre>{{ result.field_mapping }}</pre>
+        {% if result.missing_fields %}
+          <p>缺失字段：{{ result.missing_fields|join("、") }}</p>
+        {% endif %}
+      </section>
+
+      <section class="panel">
+        <h2>数据预览（前 20 条）</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>行号</th><th>街道</th><th>点位</th><th>问题描述</th><th>识别指标</th><th>图片数</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in result.preview %}
+              <tr>
+                <td>{{ row["行号"] }}</td>
+                <td>{{ row["街道"] }}</td>
+                <td>{{ row["点位"] }}</td>
+                <td>{{ row["问题描述"] }}</td>
+                <td>{{ row["识别指标"] }}</td>
+                <td>{{ row["图片数"] }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>运行日志</h2>
+        {% if result.logs %}
+          <pre>{{ result.logs|join("\n") }}</pre>
+        {% else %}
+          <p>暂无日志。</p>
+        {% endif %}
+      </section>
+    {% else %}
+      <section class="panel empty-state">
+        <div>
+          <strong>尚未生成月报</strong>
+          <span>点击右上角“生成月报”上传数据和模板。</span>
+        </div>
+      </section>
+    {% endif %}
+  </main>
+
+  <dialog id="report-dialog">
+    <form id="report-form" method="post" enctype="multipart/form-data">
+      <div class="modal-head">
+        <h2 class="modal-title">生成 Word 月报</h2>
+        <button class="secondary" id="close-dialog" type="button">关闭</button>
+      </div>
+      <div class="modal-body">
+        <h2>文件上传</h2>
+        <div class="grid">
+          <div>
+            <label for="excel_file">Excel 检查数据文件（xls / xlsx）</label>
+            <input id="excel_file" name="excel_file" type="file" accept=".xls,.xlsx" required>
+          </div>
+          <div>
+            <label for="template_file">Word 月报模板（docx）</label>
+            <input id="template_file" name="template_file" type="file" accept=".docx" required>
+          </div>
+        </div>
+
+        <h2 style="margin-top:22px;">参数设置</h2>
+        <div class="grid">
+          <div>
+            <label for="title">报告标题</label>
+            <input id="title" name="title" value="{{ title }}">
+          </div>
+          <div>
+            <label for="report_month">报告月份</label>
+            <input id="report_month" name="report_month" type="month" value="{{ report_month }}">
+          </div>
+          <div>
+            <label for="start_date">检查开始日期</label>
+            <input id="start_date" name="start_date" type="date" value="{{ start_date }}">
+          </div>
+          <div>
+            <label for="end_date">检查结束日期</label>
+            <input id="end_date" name="end_date" type="date" value="{{ end_date }}">
+          </div>
+          <div>
+            <label for="output_dir">输出地址</label>
+            <input id="output_dir" name="output_dir" value="{{ output_dir }}">
+          </div>
+          <div>
+            <label for="output_name">输出文件名</label>
+            <input id="output_name" name="output_name" value="{{ output_name }}">
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="secondary" type="button" id="cancel-button">取消</button>
+          <button id="submit-button" type="submit">生成 Word 月报</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    const dialog = document.getElementById("report-dialog");
+    const openButton = document.getElementById("open-dialog");
+    const closeButton = document.getElementById("close-dialog");
+    const cancelButton = document.getElementById("cancel-button");
+    const form = document.getElementById("report-form");
+    const button = document.getElementById("submit-button");
+
+    function closeDialog() {
+      if (dialog.open) dialog.close();
+    }
+
+    openButton.addEventListener("click", () => dialog.showModal());
+    closeButton.addEventListener("click", closeDialog);
+    cancelButton.addEventListener("click", closeDialog);
+
+    form.addEventListener("submit", () => {
+      button.disabled = true;
+      button.textContent = "正在生成";
+    });
+  </script>
+</body>
+</html>
