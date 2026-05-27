@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 from docx import Document
-from docx.enum.section import WD_ORIENT
+from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
@@ -19,6 +19,8 @@ from config.indicators import INDICATORS, REPORT_STYLE, ReportStyle
 
 
 CHINESE_NUMBERS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
+A4_WIDTH_CM = 21
+A4_HEIGHT_CM = 29.7
 
 
 def _clear_body_keep_section(document: Document) -> None:
@@ -67,6 +69,29 @@ def _set_table_borders(table) -> None:
         element.set(qn("w:space"), "0")
         element.set(qn("w:color"), "000000")
         borders.append(element)
+
+
+def _set_a4_section(section, orientation: WD_ORIENT, style: ReportStyle) -> None:
+    """设置 A4 页面方向和边距。"""
+
+    section.orientation = orientation
+    if orientation == WD_ORIENT.LANDSCAPE:
+        section.page_width = Cm(A4_HEIGHT_CM)
+        section.page_height = Cm(A4_WIDTH_CM)
+    else:
+        section.page_width = Cm(A4_WIDTH_CM)
+        section.page_height = Cm(A4_HEIGHT_CM)
+    section.top_margin = Cm(style.page_margin_cm)
+    section.bottom_margin = Cm(style.page_margin_cm)
+    section.left_margin = Cm(style.page_margin_cm)
+    section.right_margin = Cm(style.page_margin_cm)
+
+
+def _add_landscape_section(document: Document, style: ReportStyle) -> None:
+    """为附件统计表创建独立横向 A4 分节。"""
+
+    section = document.add_section(WD_SECTION.NEW_PAGE)
+    _set_a4_section(section, WD_ORIENT.LANDSCAPE, style)
 
 
 def _add_title(document: Document, title: str, style: ReportStyle) -> None:
@@ -141,15 +166,12 @@ def _new_document(template_path: Path | None, style: ReportStyle) -> Document:
     if template_path:
         document = Document(str(template_path))
         _clear_body_keep_section(document)
+        for section in document.sections:
+            _set_a4_section(section, WD_ORIENT.PORTRAIT, style)
         return document
 
     document = Document()
-    section = document.sections[0]
-    section.orientation = WD_ORIENT.PORTRAIT
-    section.top_margin = Cm(style.page_margin_cm)
-    section.bottom_margin = Cm(style.page_margin_cm)
-    section.left_margin = Cm(style.page_margin_cm)
-    section.right_margin = Cm(style.page_margin_cm)
+    _set_a4_section(document.sections[0], WD_ORIENT.PORTRAIT, style)
     return document
 
 
@@ -202,7 +224,7 @@ def generate_report(
             _add_point_problem_paragraph(document, f"{point_index}.{point_name}可回收物交投点：", _problem_text(record), style)
             _add_images(document, record.get("images", []), style)
 
-    document.add_page_break()
+    _add_landscape_section(document, style)
     _add_heading(document, f"附件：{start_date}至{end_date}可回收物交投点各项指标问题数", level=1)
     _add_statistics_table(document, stats["table_rows"], style)
 

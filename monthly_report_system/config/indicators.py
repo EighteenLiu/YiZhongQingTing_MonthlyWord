@@ -64,8 +64,8 @@ class ReportStyle:
     body_size_pt: int = 15
     table_size_pt: int = 10
     first_line_indent_chars: int = 2
-    image_width_cm: float = 7
-    image_height_cm: float = 4.5
+    image_width_cm: float = 5.1
+    image_height_cm: float = 3
     pictures_per_row: int = 3
     table_zero_text: str = "0"
 

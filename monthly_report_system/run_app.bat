@@ -1,9 +1,10 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-if not exist ".venv\Scripts\python.exe" (
+set "APP_VENV=%~dp0.venv"
+if not exist "%APP_VENV%\Scripts\python.exe" (
   echo Creating local virtual environment...
-  python -m venv .venv
-  ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+  python -m venv "%APP_VENV%"
+  "%APP_VENV%\Scripts\python.exe" -m pip install -r requirements.txt
 )
-".venv\Scripts\python.exe" app.py
+"%APP_VENV%\Scripts\python.exe" app.py
