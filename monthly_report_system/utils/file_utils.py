@@ -5,12 +5,16 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import re
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import BinaryIO
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if getattr(sys, "frozen", False):
+    PROJECT_ROOT = Path(sys.executable).resolve().parent
+else:
+    PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEMP_DIR = PROJECT_ROOT / "temp"
 OUTPUT_DIR = PROJECT_ROOT / "output"
 RUN_DIR_RETENTION_DAYS = 7
