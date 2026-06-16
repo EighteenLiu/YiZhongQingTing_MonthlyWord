@@ -1,7 +1,9 @@
 numpy<2
 pandas>=2.0
+xlrd>=2.0
 openpyxl>=3.1
 python-docx>=1.1
+docxtpl>=0.16
 Pillow>=10.0
 pywin32>=306; platform_system == "Windows"
 pytest>=8.0

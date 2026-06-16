@@ -24,7 +24,7 @@ def ensure_dirs() -> None:
 
 
 def safe_filename(filename: str, default: str = "月报.docx") -> str:
-    """清理 Windows 不允许的文件名字符。"""
+    """清理 Windows 不允许的输出文件名字符。"""
 
     name = (filename or default).strip()
     name = re.sub(r'[\\/:*?"<>|]+', "_", name)
@@ -34,7 +34,7 @@ def safe_filename(filename: str, default: str = "月报.docx") -> str:
 
 
 def safe_upload_filename(filename: str, fallback: str) -> str:
-    """清理上传文件名，去掉路径和 Windows 非法字符，同时保留中文。"""
+    """清理输入文件名，去掉路径和 Windows 非法字符，同时保留中文。"""
 
     original = (filename or fallback).strip().replace("\\", "/")
     name = original.rsplit("/", 1)[-1].strip() or fallback
@@ -89,7 +89,7 @@ def create_run_dir(prefix: str = "run_") -> Path:
 
 
 def save_upload(uploaded_file: BinaryIO, target_dir: Path, filename: str) -> Path:
-    """保存 Streamlit 上传文件。"""
+    """保存类文件对象到指定目录。"""
 
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / filename

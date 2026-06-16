@@ -1,4 +1,4 @@
-"""面向前端展示的轻量日志收集器。"""
+"""面向界面展示的轻量日志收集器。"""
 
 from __future__ import annotations
 

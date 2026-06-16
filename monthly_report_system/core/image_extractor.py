@@ -1,4 +1,4 @@
-"""从 xlsx 中提取图片，并按锚点行号归类。"""
+"""从 xlsx 中提取问题照片，并按锚点行号归类。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,12 @@ class ImageExtractError(RuntimeError):
     """图片提取失败。"""
 
 
+def _cell_text(value: object) -> str:
+    """单元格文本标准化。"""
+
+    return str(value or "").strip().replace(" ", "").replace("\n", "")
+
+
 def _anchor_to_row(image: object) -> int | None:
     """读取 openpyxl 图片锚点所在 Excel 行号。"""
 
@@ -25,6 +31,16 @@ def _anchor_to_row(image: object) -> int | None:
     if marker is None:
         return None
     return int(marker.row) + 1
+
+
+def _anchor_to_column(image: object) -> int | None:
+    """读取 openpyxl 图片锚点所在 Excel 列号。"""
+
+    anchor = getattr(image, "anchor", None)
+    marker = getattr(anchor, "_from", None)
+    if marker is None:
+        return None
+    return int(marker.col) + 1
 
 
 def _image_bytes(image: object) -> bytes:
@@ -36,15 +52,37 @@ def _image_bytes(image: object) -> bytes:
     return data.read()
 
 
+def _merged_parent_text(worksheet: object, row: int, column: int) -> str:
+    """读取合并表头中的父级文本。"""
+
+    for merged_range in worksheet.merged_cells.ranges:
+        if row == merged_range.min_row and merged_range.min_col <= column <= merged_range.max_col:
+            return _cell_text(worksheet.cell(row=merged_range.min_row, column=merged_range.min_col).value)
+    return _cell_text(worksheet.cell(row=row, column=column).value)
+
+
+def _problem_photo_columns(worksheet: object) -> set[int]:
+    """识别“问题照片”分组下的图片列。"""
+
+    columns: set[int] = set()
+    max_column = int(getattr(worksheet, "max_column", 0) or 0)
+    max_header_row = min(3, int(getattr(worksheet, "max_row", 0) or 0))
+    for column in range(1, max_column + 1):
+        parent_texts = [_merged_parent_text(worksheet, row, column) for row in range(1, max_header_row + 1)]
+        header_texts = [_cell_text(worksheet.cell(row=row, column=column).value) for row in range(1, max_header_row + 1)]
+        if any("问题照片" in text for text in parent_texts + header_texts):
+            columns.add(column)
+    return columns
+
+
 def extract_images_by_row(
     xlsx_path: Path,
     output_dir: Path,
     max_images_per_row: int = 3,
 ) -> Tuple[Dict[int, List[str]], List[str]]:
-    """提取工作簿第一张表中的图片，按图片左上角锚点行号归类。
+    """提取工作簿第一张表中的问题照片，按图片左上角锚点行号归类。
 
-    每条记录只需要 3 张图片，所以同一行超过 3 张时只保留前 3 张，
-    避免生成数百 MB 的 Word。
+    只保留“问题照片”分组下的图片列，避免把整改照片、二维码等其他图片写入月报。
     """
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -58,11 +96,20 @@ def extract_images_by_row(
         raise ImageExtractError(f"无法打开 xlsx 提取图片：{exc}") from exc
 
     worksheet = workbook.worksheets[0]
+    problem_photo_columns = _problem_photo_columns(worksheet)
+    if not problem_photo_columns:
+        warnings.append("未识别到“问题照片”列，未提取任何图片。")
+        workbook.close()
+        return {}, warnings
+
     images = getattr(worksheet, "_images", [])
     for index, image in enumerate(images, start=1):
         row_number = _anchor_to_row(image)
-        if row_number is None:
+        column_number = _anchor_to_column(image)
+        if row_number is None or column_number is None:
             warnings.append(f"第 {index} 张图片没有可识别锚点，无法匹配记录。")
+            continue
+        if column_number not in problem_photo_columns:
             continue
 
         seen_by_row[row_number] += 1

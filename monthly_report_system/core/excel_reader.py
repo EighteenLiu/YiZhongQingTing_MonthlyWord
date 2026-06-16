@@ -218,22 +218,67 @@ def _read_xlsx_with_smart_header(path: Path) -> pd.DataFrame:
     return df
 
 
+def _read_xls_with_smart_header(path: Path) -> pd.DataFrame:
+    """读取 xls 数据，复用与 xlsx 相同的智能表头策略。
+
+    xls 的图片仍由 Excel COM 转成 xlsx 后提取；这里专注于保留原始单元格文本，
+    避免某些旧表在另存为 xlsx 后把“具体问题”列规整成占位值。
+    """
+
+    raw = pd.read_excel(path, sheet_name=0, header=None, dtype=object)
+    if raw.empty:
+        raise ExcelReadError("Excel 表格为空，请检查上传文件。")
+
+    preview = raw.iloc[: min(5, len(raw))].values.tolist()
+    point_header_candidates = [index + 1 for index, row in enumerate(preview) if _is_point_header(row)]
+    if point_header_candidates:
+        header_row_number = point_header_candidates[0]
+    else:
+        scores = [_header_score(row) for row in preview]
+        best_score = max(scores)
+        header_row_number = max(index + 1 for index, score in enumerate(scores) if score == best_score) if best_score > 0 else 1
+
+    header_values = raw.iloc[header_row_number - 1].tolist()
+    if header_row_number > 1:
+        parent_values = raw.iloc[header_row_number - 2].tolist()
+        columns = [_cell_text(child) or _cell_text(parent) for parent, child in zip(parent_values, header_values)]
+    else:
+        columns = [_cell_text(value) for value in header_values]
+
+    data_start_row = header_row_number + 1
+    data = raw.iloc[data_start_row - 1 :].dropna(how="all")
+    df = pd.DataFrame(data.values.tolist(), columns=_unique_columns(columns))
+    df.attrs["excel_start_row"] = data_start_row
+    df.attrs["header_row"] = header_row_number
+    return df
+
+
 def read_excel_table(path: Path, temp_dir: Path) -> tuple[pd.DataFrame, Path]:
     """读取 Excel 第一张工作表，返回 DataFrame 和后续应使用的 xlsx 路径。"""
 
     suffix = path.suffix.lower()
     warnings: list[str] = []
 
+    data_path = path
     if suffix == ".xlsx":
         actual_path = path
     elif suffix == ".xls":
         actual_path = convert_xls_to_xlsx(path, temp_dir)
-        warnings.append(f"xls 已由 Microsoft Excel 转换为 xlsx：{actual_path.name}。后续数据读取和图片提取均使用该 xlsx 文件。")
+        warnings.append(f"xls 已由 Microsoft Excel 转换为 xlsx：{actual_path.name}。图片提取使用该 xlsx 文件。")
+        data_path = path
     else:
         raise ExcelReadError("文件格式不支持，请上传 .xls 或 .xlsx 文件。")
 
     try:
-        df = _read_xlsx_with_smart_header(actual_path)
+        if suffix == ".xls":
+            try:
+                df = _read_xls_with_smart_header(data_path)
+                warnings.append("xls 数据已从原文件读取，图片提取使用转换后的 xlsx 文件。")
+            except ImportError as exc:
+                warnings.append(f"当前环境缺少 xlrd，已回退读取转换后的 xlsx 数据：{exc}")
+                df = _read_xlsx_with_smart_header(actual_path)
+        else:
+            df = _read_xlsx_with_smart_header(actual_path)
     except Exception as exc:
         raise ExcelReadError(f"Excel 无法读取：{exc}") from exc
 
