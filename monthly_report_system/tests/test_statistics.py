@@ -42,15 +42,15 @@ def test_problem_display_prefers_indicators():
     assert problem_display(record) == "无回收价格表、占道经营"
 
 
-def test_transfer_station_stats_prefer_second_level_indicator():
+def test_transfer_station_stats_prefer_second_level_indicator_when_it_matches_detected_issue():
     records = [
         {
             "street": "西长安街街道",
             "location": "广州大厦",
-            "problem": "无七禁收八不准承诺书",
-            "specific_problem": "无七禁收八不准承诺书",
+            "problem": "无回收价格表",
+            "specific_problem": "无回收价格表",
             "secondary_indicator": "无回收价格表",
-            "indicators": ["无七禁收八不准承诺书"],
+            "indicators": ["无回收价格表"],
             "has_problem": True,
         }
     ]
@@ -64,6 +64,28 @@ def test_transfer_station_stats_prefer_second_level_indicator():
     assert "无回收价格表" in stats["summary_text"]
     assert "无七禁收八不准承诺书" not in stats["summary_text"]
     assert problem_display(records[0]) == "无回收价格表"
+
+
+def test_transfer_station_stats_ignore_second_level_indicator_when_record_has_no_problem():
+    records = [
+        {
+            "street": "西长安街街道",
+            "location": "广州大厦",
+            "problem": "无问题",
+            "specific_problem": "无问题",
+            "secondary_indicator": "无回收价格表",
+            "indicators": [],
+            "has_problem": False,
+        }
+    ]
+
+    stats = summarize_records(records, "2026年4月20日", "2026年5月19日", report_type="transfer_station")
+
+    assert stats["problem_record_count"] == 0
+    assert stats["problem_count"] == 0
+    assert stats["table_rows"][0]["无回收价格表"] == 0
+    assert "无回收价格表" not in stats["summary_text"]
+    assert problem_display(records[0]) == "无问题"
 
 
 def test_summarize_records_ignores_uncategorized_problem_text():

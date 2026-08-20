@@ -13,6 +13,7 @@ from config.indicators import (
     NON_PROBLEM_DISPLAY_MAP,
     NO_PROBLEM_WORDS,
     PROBLEM_INDICATOR_MAP,
+    indicators_for,
     indicator_keywords_for,
     secondary_locations_for,
 )
@@ -25,6 +26,42 @@ TRANSFER_STATION_DISPLAY_STATUSES = {
     "停止营业": ["停止营业"],
     "未营业": ["未营业", "无人营业"],
     "未发现点位": ["未发现点位"],
+}
+TRANSFER_STATION_MAJOR_INDICATORS = {
+    "防火标识": "无防火标识",
+    "称重系统": "无称重系统",
+    "回收价格表": "无回收价格表",
+    "灭火器有无": "无灭火器",
+    "灭火器成组配置": "灭火器未成组",
+    "灭火器是否合格": "灭火器不合格",
+    "有无占道经营情况": "占道经营",
+    "消防安全水源": "无消防安全水源",
+    "周边环境": "周边环境脏乱",
+    "七禁收八不准承诺书": "无七禁收八不准承诺书",
+}
+EXPLICIT_NO_PROBLEM_WORDS = {
+    "无问题",
+    "未发现问题",
+    "暂无问题",
+    "没有问题",
+    "无异常",
+    "未见异常",
+    "正常",
+    "合格",
+    "良好,未发现问题",
+    "良好，未发现问题",
+}
+EXPLICIT_NON_PROBLEM_VALUES = {
+    "0",
+    "否",
+    "无",
+    "未",
+    "未使用",
+    "未发现",
+    "没有",
+    "正常",
+    "合格",
+    "良好",
 }
 
 
@@ -113,12 +150,31 @@ def transfer_station_status_display_text(value: Any, secondary_indicator: Any = 
     return ""
 
 
-def _transfer_station_indicator_source(specific_problem: str, problem: str, secondary_indicator: str) -> str:
-    """交投点问题类型以 2级指标为准，具体问题只处理占位值。"""
+def is_transfer_station_status_text(value: Any) -> bool:
+    """判断交投点具体问题是否只是停业、未见点位等非问题状态。"""
 
+    text = normalize_problem_text(value)
+    return any(
+        normalize_problem_text(keyword) in text
+        for keywords in TRANSFER_STATION_DISPLAY_STATUSES.values()
+        for keyword in keywords
+    )
+
+
+def _transfer_station_indicator_source(specific_problem: str, problem: str, secondary_indicator: str, raw: Dict[str, Any]) -> str:
+    """交投点具体问题不是无问题类表述时，以 2级指标为准。"""
+
+    source_problem = specific_problem or problem
+    if is_transfer_station_status_text(source_problem):
+        return source_problem
+    if secondary_indicator == TRANSFER_STATION_GOOD_INDICATOR:
+        detected = detect_indicators(source_problem, raw, "transfer_station")
+        return "；".join(detected) if detected else secondary_indicator
+    if secondary_indicator in TRANSFER_STATION_MAJOR_INDICATORS:
+        return TRANSFER_STATION_MAJOR_INDICATORS[secondary_indicator]
     if secondary_indicator:
         return secondary_indicator
-    return specific_problem or problem
+    return source_problem
 
 
 def is_fixed_non_problem_status(value: Any) -> bool:
@@ -133,12 +189,53 @@ def is_indicator_placeholder(value: Any) -> bool:
     return normalize_problem_text(value) == "1"
 
 
+def _is_sorting_station_good_result(value: Any) -> bool:
+    """判断驿站 3级指标是否为合规结果，而不是问题项。"""
+
+    compact = normalize_problem_text(value)
+    if not compact:
+        return True
+    if compact in {normalize_problem_text(word) for word in EXPLICIT_NON_PROBLEM_VALUES}:
+        return True
+    if compact in {normalize_problem_text(word) for word in EXPLICIT_NO_PROBLEM_WORDS}:
+        return True
+    if compact.endswith("良好") or compact.endswith("正常") or (
+        compact.endswith("合格") and not compact.endswith("不合格")
+    ):
+        return True
+
+    for indicator in indicators_for("sorting_station"):
+        metric = normalize_problem_text(indicator)
+        if not metric:
+            continue
+        if not metric.startswith("无") and compact == f"无{metric}":
+            return True
+        if metric.startswith("使用"):
+            used_object = metric[len("使用") :]
+            if compact == f"未使用{used_object}":
+                return True
+        if compact == f"未{metric}":
+            return True
+    return False
+
+
+def is_non_problem_explicit_value(value: Any, report_type: str = "transfer_station") -> bool:
+    """判断指标列中的显式值是否代表无问题。"""
+
+    compact = normalize_problem_text(value)
+    if report_type == "sorting_station":
+        return _is_sorting_station_good_result(value)
+    return compact in {normalize_problem_text(word) for word in EXPLICIT_NON_PROBLEM_VALUES}
+
+
 def detect_indicators(problem_text: str, row: Dict[str, Any] | None = None, report_type: str = "transfer_station") -> List[str]:
     """从问题描述和可能存在的指标列中识别问题类型。"""
 
     row = row or {}
     normalized = normalize_problem_text(problem_text)
     if normalized in NON_PROBLEM_DISPLAY_MAP:
+        return []
+    if report_type == "sorting_station" and _is_sorting_station_good_result(problem_text):
         return []
 
     compact = cell_to_text(problem_text).replace(" ", "")
@@ -148,7 +245,7 @@ def detect_indicators(problem_text: str, row: Dict[str, Any] | None = None, repo
 
     for indicator, groups in indicator_keywords_for(report_type).items():
         explicit_value = cell_to_text(row.get(indicator))
-        if explicit_value and explicit_value not in {"0", "否", "无", "正常"} and indicator not in found:
+        if explicit_value and not is_non_problem_explicit_value(explicit_value, report_type) and indicator not in found:
             found.append(indicator)
             continue
         for group in groups:
@@ -168,12 +265,38 @@ def is_no_problem(problem_text: str, result_text: str = "") -> bool:
     return normalize_problem_text(problem_text) in NON_PROBLEM_DISPLAY_MAP or problem in NO_PROBLEM_WORDS or result in NO_PROBLEM_WORDS
 
 
+def is_explicit_no_problem_text(value: Any) -> bool:
+    """判断“具体问题”是否明确表达为无问题。"""
+
+    return normalize_problem_text(value) in {normalize_problem_text(word) for word in EXPLICIT_NO_PROBLEM_WORDS}
+
+
 def _should_preserve_problem_text(report_type: str, value: Any) -> bool:
     """停车场报告正文按“具体问题”原文输出，不再依赖旧指标词库判定。"""
 
     if report_type != "parking_station":
         return False
     return not is_no_problem(cell_to_text(value))
+
+
+def _sorting_station_indicator_source(
+    specific_problem: str,
+    problem: str,
+    secondary_indicator: str,
+    tertiary_indicator: str,
+) -> str:
+    """驿站报告优先按指标列判断，3级缺失时用 2级指标兜底。"""
+
+    source_problem = specific_problem or problem
+    if tertiary_indicator:
+        return tertiary_indicator if not _is_sorting_station_good_result(tertiary_indicator) else "无问题"
+    if _is_sorting_station_good_result(secondary_indicator):
+        return "无问题"
+    if is_explicit_no_problem_text(source_problem):
+        return "无问题"
+    if detect_indicators(secondary_indicator, {}, "sorting_station"):
+        return secondary_indicator
+    return "无问题"
 
 
 def _strip_point_suffix(value: str) -> str:
@@ -237,14 +360,26 @@ def clean_dataframe(df: pd.DataFrame, report_type: str = "transfer_station") -> 
             continue
 
         problem = cell_to_text(raw.get(mapping.get("problem", ""), ""))
-        specific_problem = cell_to_text(raw.get(mapping.get("specific_problem", ""), "")) or problem
+        raw_specific_problem = cell_to_text(raw.get(mapping.get("specific_problem", ""), ""))
+        specific_problem = raw_specific_problem or problem
         secondary_indicator = cell_to_text(raw.get(mapping.get("secondary_indicator", ""), ""))
-        if report_type == "transfer_station":
-            indicator_source = _transfer_station_indicator_source(specific_problem, problem, secondary_indicator)
+        tertiary_indicator = cell_to_text(raw.get(mapping.get("tertiary_indicator", ""), ""))
+        explicit_no_problem = report_type in {"transfer_station", "sorting_station"} and is_explicit_no_problem_text(
+            raw_specific_problem if "specific_problem" in mapping else problem
+        )
+        if explicit_no_problem:
+            indicator_source = "无问题"
+        elif report_type == "transfer_station":
+            indicator_source = _transfer_station_indicator_source(specific_problem, problem, secondary_indicator, raw)
+        elif report_type == "sorting_station":
+            indicator_source = _sorting_station_indicator_source(
+                specific_problem, problem, secondary_indicator, tertiary_indicator
+            )
         else:
             indicator_source = secondary_indicator if is_indicator_placeholder(specific_problem or problem) else specific_problem or problem
         status_display_problem = (
             transfer_station_status_display_text(specific_problem or problem, secondary_indicator)
+            or (problem_display_text(specific_problem or problem) if report_type == "transfer_station" and is_transfer_station_status_text(specific_problem or problem) else "")
             if report_type == "transfer_station"
             else ""
         )
@@ -266,6 +401,7 @@ def clean_dataframe(df: pd.DataFrame, report_type: str = "transfer_station") -> 
             "problem": indicator_source,
             "specific_problem": display_problem,
             "secondary_indicator": secondary_indicator,
+            "tertiary_indicator": tertiary_indicator,
             "report_group": report_group,
             "report_point": _strip_point_suffix(report_point),
             "check_date": cell_to_text(raw.get(mapping.get("check_date", ""), "")),
@@ -274,7 +410,10 @@ def clean_dataframe(df: pd.DataFrame, report_type: str = "transfer_station") -> 
         }
         if not record["street"] and not record["location"] and not record["problem"] and not report_group and not report_point:
             continue
-        indicators = detect_indicators(indicator_source, raw, report_type)
+        if explicit_no_problem:
+            indicators = []
+        else:
+            indicators = detect_indicators(indicator_source, raw, report_type)
         record["indicators"] = indicators
         record["has_problem"] = bool(indicators)
         if not indicators and status_display_problem:

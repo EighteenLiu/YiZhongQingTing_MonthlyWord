@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter, OrderedDict
+import math
 from pathlib import Path
 import re
 import tempfile
@@ -11,26 +12,105 @@ from zipfile import ZipFile
 
 from docx.shared import Cm
 
-from core.data_cleaner import detect_indicators
+from core.data_cleaner import _is_sorting_station_good_result, detect_indicators, is_non_problem_explicit_value
 from core.report_generator import _format_problem_text, _split_problem_parts
+from utils.file_utils import TEMP_DIR
+
+
+def _compact_metric(value: Any) -> str:
+    text = str(value or "").strip()
+    replacements = {
+        " ": "",
+        "\n": "",
+        "\r": "",
+        "\t": "",
+        "（": "(",
+        "）": ")",
+        "，": ",",
+        "；": ";",
+        "：": ":",
+        "台帐": "台账",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return re.sub(r"\s+", "", text).strip("。；;，,")
 
 
 SORTING_METRICS = [
     "四分类桶不成组",
-    "备案公示过期",
-    "无企安安",
-    "无回收服务五公开或回收服务五公开不齐全",
-    "无备案公示",
-    "无巡查记录表",
-    "无消防水源",
-    "无称重系统或称重系统损坏",
-    "无精细化管理台账",
-    "无隐患排查台账或隐患排查台账不合格",
     "无驿站公示牌或驿站公示牌不合格",
     "未按时开门运行",
+    "无备案公示",
+    "无称重系统或称重系统损坏",
+    "驿站周边环境脏乱",
     "驿站内环境脏乱",
+    "使用大功率电器",
+    "备案公示过期",
+    "无人值守",
+    "无回收服务五公开或回收服务五公开不齐全",
+    "无回收人员信息",
+    "无安全风险公告",
+    "容器颜色不符",
+    "无便利性措施",
+    "居民居住",
+    "无消防设备器材或不合格",
+    "灭火器缺少",
+    "无消防水源",
+    "无企安安",
+    "无消防安全管理制度或不齐全",
+    "无消防安全应急预案",
+    "容器无标识、标识不符、脱落、破损",
+    "无防火标识",
+    "无安全生产责任制度",
+    "无价格公式",
+    "无隐患排查台账或隐患排查台账不合格",
+    "无消防培训演练资料",
+    "无生活垃圾分类管理台账",
+    "无巡查记录表",
+    "无精细化管理台账",
 ]
+SORTING_METRIC_ALIASES = {
+    "未开门运行": "未按时开门运行",
+    "无消防设备器材或消防设备器不合格": "无消防设备器材或不合格",
+    "无消防培训演练资料或消防培训演练资料不合格": "无消防培训演练资料",
+    "无价格公示": "无价格公式",
+    "备案公示": "无备案公示",
+    "备案公示缺少": "无备案公示",
+    "无备案信息": "无备案公示",
+    "企安安": "无企安安",
+    "无生活垃圾分类管理台帐": "无生活垃圾分类管理台账",
+    "细化台帐": "无精细化管理台账",
+    "细化台账": "无精细化管理台账",
+    "称重": "无称重系统或称重系统损坏",
+    "称重计量": "无称重系统或称重系统损坏",
+    "周边不洁": "驿站周边环境脏乱",
+    "堆积杂物": "驿站内环境脏乱",
+    "杂物堆积": "驿站内环境脏乱",
+    "备案信息已过期": "备案公示过期",
+    "备案信息过期": "备案公示过期",
+    "无精细化管理台帐": "无精细化管理台账",
+    "无隐患排查台帐或隐患排查台帐不合格": "无隐患排查台账或隐患排查台账不合格",
+}
+SORTING_METRIC_LOOKUP = {
+    _compact_metric(metric): metric for metric in SORTING_METRICS
+}
+SORTING_METRIC_LOOKUP.update(
+    {_compact_metric(alias): canonical for alias, canonical in SORTING_METRIC_ALIASES.items()}
+)
 NO_ISSUE_TEXTS = {"", "1", "无", "无问题", "无问题。", "正常", "合格", "良好，未发现问题"}
+EXPLICIT_NO_ISSUE_TEXTS = {
+    "无问题",
+    "无问题。",
+    "未发现问题",
+    "未发现问题。",
+    "暂无问题",
+    "没有问题",
+    "无异常",
+    "未见异常",
+    "正常",
+    "合格",
+    "良好，未发现问题",
+}
 CN_NUMBERS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
 
 
@@ -38,6 +118,10 @@ ImageFactory = Callable[[str], Any]
 
 
 def _text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and math.isnan(value):
+        return ""
     return str(value or "").strip()
 
 
@@ -45,8 +129,51 @@ def _compact(value: Any) -> str:
     return re.sub(r"\s+", "", _text(value)).strip("。；;，,")
 
 
+def _canonical_metric(value: Any) -> str:
+    return SORTING_METRIC_LOOKUP.get(_compact_metric(value), "")
+
+
+def _contained_metrics(value: Any) -> List[str]:
+    if _is_sorting_station_good_result(value):
+        return []
+
+    compact_value = _compact_metric(value)
+    if not compact_value:
+        return []
+
+    metrics: List[str] = []
+    for phrase, metric in SORTING_METRIC_LOOKUP.items():
+        if phrase and phrase in compact_value and metric not in metrics:
+            metrics.append(metric)
+    return metrics
+
+
+def _is_generic_ledger_phrase(value: Any) -> bool:
+    compact_value = _compact_metric(value)
+    if "台账" not in compact_value:
+        return False
+    specific_ledger_words = ["隐患排查", "生活垃圾分类", "巡查", "精细化"]
+    return not any(word in compact_value for word in specific_ledger_words)
+
+
+def _split_metric_parts(value: Any) -> List[str]:
+    text = _text(value)
+    if not text:
+        return []
+    parts: List[str] = []
+    for part in re.split(r"[;；、,，\s]+", text):
+        part = part.strip()
+        if part:
+            parts.append(part)
+    return parts
+
+
 def _no_issue_compacts() -> set[str]:
     return {_compact(text) for text in NO_ISSUE_TEXTS}
+
+
+def _explicit_no_issue_compacts() -> set[str]:
+    return {_compact(text) for text in EXPLICIT_NO_ISSUE_TEXTS}
 
 
 def _cn_index(index: int) -> str:
@@ -80,29 +207,91 @@ def _secondary_indicator(record: Dict[str, Any]) -> str:
     return _text(record.get("secondary_indicator")) or _raw_value(record, "2级指标")
 
 
+def _tertiary_indicator(record: Dict[str, Any]) -> str:
+    return _text(record.get("tertiary_indicator")) or _raw_value(record, "3级指标")
+
+
+def _append_metric(metrics: List[str], metric: str) -> None:
+    if metric and metric not in metrics:
+        metrics.append(metric)
+
+
+def _normalize_metric_priority(metrics: List[str]) -> List[str]:
+    if "备案公示过期" in metrics and "无备案公示" in metrics:
+        return [metric for metric in metrics if metric != "无备案公示"]
+    return metrics
+
+
+def _metrics_from_text_parts(value: Any, record: Dict[str, Any]) -> List[str]:
+    metrics: List[str] = []
+    for part in _split_metric_parts(value) or _split_problem_parts(_text(value)) or [_text(value)]:
+        metric = _canonical_metric(part)
+        _append_metric(metrics, metric)
+        for contained_metric in _contained_metrics(part):
+            _append_metric(metrics, contained_metric)
+        for indicator in detect_indicators(part, {}, report_type="sorting_station"):
+            _append_metric(metrics, _canonical_metric(indicator))
+        if _is_generic_ledger_phrase(part):
+            _append_metric(metrics, "无精细化管理台账")
+
+    for indicator in detect_indicators(_text(value), record.get("raw") or {}, report_type="sorting_station"):
+        _append_metric(metrics, _canonical_metric(indicator))
+    return _normalize_metric_priority(metrics)
+
+
+def _has_explicit_metric_value(record: Dict[str, Any]) -> bool:
+    for key, value in (record.get("raw") or {}).items():
+        if not _canonical_metric(key):
+            continue
+        explicit_value = _compact(value)
+        if explicit_value and not is_non_problem_explicit_value(explicit_value, "sorting_station"):
+            return True
+    return False
+
+
 def _is_no_issue(record: Dict[str, Any]) -> bool:
+    if _compact(_raw_value(record, "具体问题")) in _explicit_no_issue_compacts():
+        return True
+
+    if _has_explicit_metric_value(record):
+        return False
+
+    tertiary = _tertiary_indicator(record)
+    if tertiary:
+        return _compact(tertiary) in _no_issue_compacts() or not _metrics_from_text_parts(tertiary, record)
+
     secondary = _secondary_indicator(record)
     if secondary:
-        return _compact(secondary) in _no_issue_compacts()
+        if _compact(secondary) not in _no_issue_compacts():
+            return not _metrics_from_text_parts(secondary, record)
+        source = _source_problem(record)
+        return not source or _compact(source) in _no_issue_compacts()
 
     source = _source_problem(record)
     return _compact(source) in _no_issue_compacts()
 
 
 def _record_metrics(record: Dict[str, Any]) -> List[str]:
-    secondary = _secondary_indicator(record)
     if _is_no_issue(record):
         return []
 
-    indicator_source = secondary or _source_problem(record)
+    tertiary = _tertiary_indicator(record)
+    secondary = _secondary_indicator(record)
+    indicator_source = tertiary or secondary or _source_problem(record)
     metrics: List[str] = []
-    for part in _split_problem_parts(indicator_source) or [indicator_source]:
-        if part in SORTING_METRICS and part not in metrics:
-            metrics.append(part)
-
-    for indicator in detect_indicators(indicator_source, record.get("raw") or {}, report_type="sorting_station"):
-        if indicator in SORTING_METRICS and indicator not in metrics:
-            metrics.append(indicator)
+    for metric in _metrics_from_text_parts(indicator_source, record):
+        _append_metric(metrics, metric)
+    source_problem = _source_problem(record)
+    if not tertiary and not secondary and source_problem and _compact(source_problem) not in _no_issue_compacts():
+        for metric in _metrics_from_text_parts(source_problem, record):
+            _append_metric(metrics, metric)
+    for key, value in (record.get("raw") or {}).items():
+        metric = _canonical_metric(key)
+        if not metric or metric in metrics:
+            continue
+        explicit_value = _compact(value)
+        if explicit_value and not is_non_problem_explicit_value(explicit_value, "sorting_station"):
+            metrics.append(metric)
     return metrics
 
 
@@ -110,20 +299,38 @@ def _issue_parts(record: Dict[str, Any], metrics: List[str]) -> List[str]:
     if _is_no_issue(record):
         return []
 
+    tertiary = _tertiary_indicator(record)
+    if tertiary:
+        tertiary_metrics = _metrics_from_text_parts(tertiary, record)
+        if tertiary_metrics:
+            return tertiary_metrics
+        return []
+
     secondary = _secondary_indicator(record)
     if secondary:
-        return [part for part in (_split_problem_parts(secondary) or [secondary]) if _compact(part) not in _no_issue_compacts()]
+        secondary_metrics = _metrics_from_text_parts(secondary, record)
+        if secondary_metrics:
+            return secondary_metrics
+        return []
 
-    source = _source_problem(record)
+    source_problem = _source_problem(record)
+    if source_problem and _compact(source_problem) not in _no_issue_compacts():
+        problem_metrics = _metrics_from_text_parts(source_problem, record)
+        if problem_metrics:
+            return problem_metrics
+
+    source = source_problem
     if _compact(source) in _no_issue_compacts():
         return metrics
     return _split_problem_parts(source) or metrics
 
 
-def _append_unique(parts: List[str], value: str) -> None:
+def _append_unique(parts: List[str], value: str) -> bool:
     text = value.strip()
     if text and text not in parts:
         parts.append(text)
+        return True
+    return False
 
 
 def _photo_rows(image_paths: Iterable[str], image_factory: ImageFactory | None = None) -> List[Dict[str, Any]]:
@@ -139,6 +346,10 @@ def _photo_rows(image_paths: Iterable[str], image_factory: ImageFactory | None =
     return rows
 
 
+def _complete_metric_counts(metrics: Counter) -> Dict[str, int]:
+    return {metric: metrics.get(metric, 0) for metric in SORTING_METRICS}
+
+
 def _group_points(records: List[Dict[str, Any]]) -> "OrderedDict[str, OrderedDict[str, Dict[str, Any]]]":
     grouped: "OrderedDict[str, OrderedDict[str, Dict[str, Any]]]" = OrderedDict()
     for record in records:
@@ -152,9 +363,9 @@ def _group_points(records: List[Dict[str, Any]]) -> "OrderedDict[str, OrderedDic
         point_data = points[point]
         metrics = _record_metrics(record)
         for issue in _issue_parts(record, metrics):
-            _append_unique(point_data["issue_parts"], issue)
-        for metric in metrics:
-            point_data["metrics"][metric] += 1
+            if _append_unique(point_data["issue_parts"], issue):
+                for metric in _metrics_from_text_parts(issue, {"raw": {}}):
+                    point_data["metrics"][metric] += 1
         point_data["images"].extend(record.get("images", []))
     return grouped
 
@@ -182,6 +393,8 @@ def build_sorting_station_context(
             if issue_text:
                 notified_problem_site_count += 1
             street_metrics.update(point["metrics"])
+            if not issue_text and not point["images"]:
+                continue
             point_context.append(
                 {
                     "display_name": point["display_name"],
@@ -200,9 +413,9 @@ def build_sorting_station_context(
                 "points": point_context,
             }
         )
-        metric_rows.append({"street_name": street_name, "metrics": {metric: street_metrics.get(metric, 0) for metric in SORTING_METRICS}})
+        metric_rows.append({"street_name": street_name, "metrics": _complete_metric_counts(street_metrics)})
 
-    metric_rows.insert(0, {"street_name": "总计", "metrics": {metric: total_metrics.get(metric, 0) for metric in SORTING_METRICS}})
+    metric_rows.insert(0, {"street_name": "总计", "metrics": _complete_metric_counts(total_metrics)})
 
     return {
         "title": title or "西城区生活垃圾分类驿站检查通报",
@@ -232,7 +445,7 @@ def summarize_sorting_station_records(records: List[Dict[str, Any]], start_date:
     }
 
 
-def _patch_sorting_template(template_path: Path) -> Path:
+def _patch_sorting_template(template_path: Path, temp_dir: Path | None = None) -> Path:
     """修正当前驿站 Jinja 模板中的 point.photo_rows 变量不一致。"""
 
     with ZipFile(template_path, "r") as source:
@@ -251,7 +464,14 @@ def _patch_sorting_template(template_path: Path) -> Path:
     if not changed:
         return template_path
 
-    temp_file = tempfile.NamedTemporaryFile(prefix=f"{template_path.stem}_patched_", suffix=".docx", delete=False)
+    target_temp_dir = temp_dir or TEMP_DIR
+    target_temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_file = tempfile.NamedTemporaryFile(
+        prefix=f"{template_path.stem}_patched_",
+        suffix=".docx",
+        dir=target_temp_dir,
+        delete=False,
+    )
     temp_name = temp_file.name
     temp_file.close()
     with ZipFile(temp_name, "w") as target:
@@ -269,6 +489,7 @@ def generate_sorting_station_report(
     end_date: str,
     report_month: str,
     template_path: Path | None = None,
+    temp_dir: Path | None = None,
 ) -> Path:
     """使用 docxtpl 渲染生活垃圾分类驿站检查通报。"""
 
@@ -282,7 +503,7 @@ def generate_sorting_station_report(
     except ImportError as exc:
         raise RuntimeError("缺少 docxtpl/jinja2 依赖，请运行 run_app.bat 重新安装 requirements.txt。") from exc
 
-    patched_template = _patch_sorting_template(template_path)
+    patched_template = _patch_sorting_template(template_path, temp_dir=temp_dir)
     template = DocxTemplate(str(patched_template))
 
     def image_factory(path: str) -> Any:

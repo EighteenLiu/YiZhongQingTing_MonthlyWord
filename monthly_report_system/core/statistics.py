@@ -57,10 +57,16 @@ def summarize_records(records: List[Dict[str, Any]], start_date: str, end_date: 
 def _record_indicators(record: Dict[str, Any], report_type: str, allowed_indicators: List[str]) -> List[str]:
     """生成统计和汇总应使用的问题指标。"""
 
+    if record.get("has_problem") is False:
+        return []
+
     if report_type == "transfer_station":
+        record_indicators = [indicator for indicator in record.get("indicators", []) if indicator in allowed_indicators]
         secondary_indicator = str(record.get("secondary_indicator") or "").strip()
-        if secondary_indicator in allowed_indicators:
+        if secondary_indicator in record_indicators:
             return [secondary_indicator]
+        if record_indicators:
+            return record_indicators
 
     return [indicator for indicator in record.get("indicators", []) if indicator in allowed_indicators]
 
@@ -105,6 +111,10 @@ def build_summary_text(
 
 def problem_display(record: Dict[str, Any]) -> str:
     """生成案例中展示的问题文本。"""
+
+    if record.get("has_problem") is False:
+        problem = str(record.get("specific_problem") or record.get("problem") or "").strip()
+        return problem or "无问题"
 
     transfer_indicators = indicators_for("transfer_station")
     secondary_indicator = str(record.get("secondary_indicator") or "").strip()

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
-from collections import OrderedDict
+from collections import Counter, OrderedDict, defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
+from zipfile import ZipFile
 
 from docx import Document
 from docx.enum.section import WD_ORIENT, WD_SECTION
@@ -23,6 +24,8 @@ from config.indicators import REPORT_STYLE, ReportStyle, indicators_for
 CHINESE_NUMBERS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
 A4_WIDTH_CM = 21
 A4_HEIGHT_CM = 29.7
+TRANSFER_METRIC_TABLE_COLUMN_WIDTH_CM = 2
+TWIPS_PER_CM = 567
 PLAIN_PROBLEM_TEXTS = {
     "无问题",
     "未营业",
@@ -33,6 +36,26 @@ PLAIN_PROBLEM_TEXTS = {
     "未见点位或点位已撤",
     "无点位或点位已撤",
 }
+TRANSFER_JINJA_MARKERS = {
+    "report_range_text",
+    "street_count",
+    "check_count",
+    "problem_count",
+    "problem_summary_text",
+    "summary_text",
+    "streets",
+    "table_rows",
+}
+
+
+class _InlineImageRow:
+    """把同一行的多张 InlineImage 连续渲染，不在图片之间插入空格。"""
+
+    def __init__(self, images: Iterable[Any]) -> None:
+        self.images = list(images)
+
+    def __str__(self) -> str:
+        return "".join(str(image) for image in self.images)
 
 
 @dataclass
@@ -117,11 +140,11 @@ def _is_heading1_text(text: str) -> bool:
 
 
 def _is_heading2_text(text: str) -> bool:
-    return bool(re.match(r"^（[一二三四五六七八九十]+）", text))
+    return bool(re.match(r"^（[一二三四五六七八九十]+）", text)) or "{{ street.index_cn }}" in text
 
 
 def _is_heading3_text(text: str) -> bool:
-    return bool(re.match(r"^\d+[.．、]", text)) and "交投点" in text
+    return (bool(re.match(r"^\d+[.．、]", text)) and "交投点" in text) or "{{ point.display_name }}" in text
 
 
 def _capture_template_format(document: Document) -> TemplateFormat:
@@ -244,6 +267,51 @@ def _set_table_borders(table) -> None:
         borders.append(element)
 
 
+def _set_table_fixed_layout(table) -> None:
+    tbl_pr = table._tbl.tblPr  # noqa: SLF001
+    layout = tbl_pr.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        tbl_pr.append(layout)
+    layout.set(qn("w:type"), "fixed")
+
+
+def _set_cell_width(cell, width_cm: float) -> None:
+    width_twips = str(int(round(width_cm * TWIPS_PER_CM)))
+    tc_pr = cell._tc.get_or_add_tcPr()  # noqa: SLF001
+    tc_w = tc_pr.find(qn("w:tcW"))
+    if tc_w is None:
+        tc_w = OxmlElement("w:tcW")
+        tc_pr.append(tc_w)
+    tc_w.set(qn("w:w"), width_twips)
+    tc_w.set(qn("w:type"), "dxa")
+    cell.width = Cm(width_cm)
+
+
+def _set_table_column_widths(table, width_cm: float = TRANSFER_METRIC_TABLE_COLUMN_WIDTH_CM) -> None:
+    """固定统计表列宽，避免 Word 根据内容自动撑开。"""
+
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    _set_table_fixed_layout(table)
+    for column in table.columns:
+        column.width = Cm(width_cm)
+    for row in table.rows:
+        for cell in row.cells:
+            _set_cell_width(cell, width_cm)
+
+
+def _is_transfer_metric_table(table) -> bool:
+    texts = [cell.text.strip() for row in table.rows[:3] for cell in row.cells]
+    return "街道名称" in texts and "问题总数" in texts
+
+
+def _format_transfer_metric_tables(document: Document) -> None:
+    for table in document.tables:
+        if _is_transfer_metric_table(table):
+            _set_table_column_widths(table)
+
+
 def _set_a4_section(section, orientation: WD_ORIENT, style: ReportStyle) -> None:
     """设置 A4 页面方向和边距。"""
 
@@ -346,12 +414,14 @@ def _add_point_problem_paragraph(
     template_format: TemplateFormat | None = None,
 ) -> None:
     text_format = template_format.heading3 if template_format else None
+    paragraph = document.add_heading("", level=3)
+    paragraph.paragraph_format.first_line_indent = Pt(0)
     if text_format is not None:
-        paragraph = document.add_paragraph()
         _apply_text_format(paragraph, text_format)
-    else:
-        paragraph = document.add_heading("", level=3)
-        paragraph.paragraph_format.first_line_indent = Pt(0)
+        try:
+            paragraph.style = "Heading 3"
+        except KeyError:
+            pass
     problem_text = _format_problem_text(problem_text)
     run = paragraph.add_run(heading_text)
     if text_format is not None:
@@ -448,8 +518,7 @@ def _add_statistics_table(
             table.style = template_format.table_style_name
         except KeyError:
             pass
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    table.autofit = True
+    _set_table_column_widths(table)
     for i, column in enumerate(columns):
         _set_cell_text(
             table.rows[0].cells[i],
@@ -531,6 +600,10 @@ def _merge_point_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
         target = merged[key]
         target["has_problem"] = bool(target.get("has_problem")) or bool(record.get("has_problem"))
+        target_indicators = target.setdefault("indicators", [])
+        for indicator in record.get("indicators") or []:
+            if indicator not in target_indicators:
+                target_indicators.append(indicator)
         _append_problem_text(target, _problem_text(record))
         target.setdefault("images", []).extend(record.get("images", []))
 
@@ -564,16 +637,174 @@ def _append_problem_text(record: Dict[str, Any], problem_text: str) -> None:
 def _problem_text(record: Dict[str, Any]) -> str:
     if record.get("has_problem"):
         text = str(record.get("secondary_indicator") or "").strip()
+        indicators = [str(indicator).strip() for indicator in record.get("indicators") or [] if str(indicator).strip()]
+        if text and text in indicators:
+            return text
+        if indicators:
+            return "；".join(indicators)
         if text:
             return text
-        indicators = record.get("indicators") or []
-        if indicators:
-            return "；".join(str(indicator).strip() for indicator in indicators if str(indicator).strip())
 
     text = str(record.get("specific_problem") or record.get("problem") or "").strip()
     if text:
         return text
     return "" if record.get("has_problem") else "无问题"
+
+
+def _template_xml_text(template_path: Path) -> str:
+    """读取 docx XML 文本，用于判断模板是否声明了交投点 Jinja 变量。"""
+
+    with ZipFile(template_path, "r") as package:
+        chunks = []
+        for name in package.namelist():
+            if name.startswith("word/") and name.endswith(".xml"):
+                chunks.append(package.read(name).decode("utf-8", errors="ignore"))
+        return "\n".join(chunks)
+
+
+def _has_transfer_jinja_markers(template_path: Path) -> bool:
+    """只有模板使用交投点上下文字段时才启用 Jinja 渲染。"""
+
+    text = _template_xml_text(template_path)
+    return any(marker in text for marker in TRANSFER_JINJA_MARKERS)
+
+
+def _problem_summary_text(stats: Dict[str, Any]) -> str:
+    """生成不带句号的问题明细，供模板按需插入。"""
+
+    indicator_by_street = stats.get("indicator_by_street") or {}
+    indicator_totals: Dict[str, Counter] = defaultdict(Counter)
+    for street, counter in indicator_by_street.items():
+        for indicator, count in dict(counter).items():
+            if count:
+                indicator_totals[indicator][street] += count
+
+    details = []
+    for indicator, street_counter in indicator_totals.items():
+        street_text = "、".join(f"{street}{count}个" for street, count in street_counter.items() if count)
+        if street_text:
+            details.append(f"{indicator}（{street_text}）")
+    return "；".join(details)
+
+
+def _image_rows(images: List[Any], per_row: int = 2) -> List[Any]:
+    """按行组合图片，模板循环 point.photos 时每项代表一行。"""
+
+    return [_InlineImageRow(images[index : index + per_row]) for index in range(0, len(images), per_row)]
+
+
+def _metric_rows(table_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把统计表行转换为交投点 Jinja 模板期望的 metric_rows 结构。"""
+
+    rows = []
+    for row in table_rows:
+        metrics = {key: value for key, value in row.items() if key not in {"街道名称", "问题总数"}}
+        rows.append(
+            {
+                "street_name": row.get("街道名称", ""),
+                "problem_total": row.get("问题总数", 0),
+                "metrics": metrics,
+                "raw": row,
+            }
+        )
+    return rows
+
+
+def build_transfer_report_context(
+    records: List[Dict[str, Any]],
+    stats: Dict[str, Any],
+    title: str,
+    start_date: str,
+    end_date: str,
+    image_factory=None,
+) -> Dict[str, Any]:
+    """构造交投点 Jinja 模板上下文。"""
+
+    streets = []
+    for group_index, (group_name, group_records) in enumerate(_group_records(records).items(), start=1):
+        points = []
+        for point_index, record in enumerate(_merge_point_records(group_records), start=1):
+            point_name = str(record.get("report_point") or record.get("location") or "未识别点位").strip()
+            images = [image_factory(path) if image_factory else path for path in record.get("images", [])]
+            photo_rows = _image_rows(images)
+            points.append(
+                {
+                    "index": point_index,
+                    "display_name": point_name,
+                    "name": point_name,
+                    "heading_text": f"{point_index}.{point_name}可回收物交投点：",
+                    "issue_text": _format_problem_text(_problem_text(record)),
+                    "problem_text": _problem_text(record),
+                    "images": images,
+                    "photos": photo_rows,
+                    "photo_rows": photo_rows,
+                    "raw": record,
+                }
+            )
+        streets.append(
+            {
+                "index": group_index,
+                "index_cn": _cn_index(group_index),
+                "name": group_name,
+                "points": points,
+            }
+        )
+
+    return {
+        "title": title,
+        "start_date": start_date,
+        "end_date": end_date,
+        "report_range_text": f"{start_date}至{end_date}",
+        "street_count": stats.get("street_count", 0),
+        "check_count": stats.get("record_count", 0),
+        "record_count": stats.get("record_count", 0),
+        "problem_record_count": stats.get("problem_record_count", 0),
+        "problem_count": stats.get("problem_count", 0),
+        "problem_summary_text": _problem_summary_text(stats),
+        "summary_text": stats.get("summary_text", ""),
+        "streets": streets,
+        "table_rows": stats.get("table_rows", []),
+        "metric_rows": _metric_rows(stats.get("table_rows", [])),
+        "stats": stats,
+    }
+
+
+def _generate_report_from_jinja_template(
+    records: List[Dict[str, Any]],
+    stats: Dict[str, Any],
+    output_path: Path,
+    title: str,
+    start_date: str,
+    end_date: str,
+    template_path: Path,
+) -> Path:
+    """使用交投点 Jinja 模板渲染 Word。"""
+
+    try:
+        from docxtpl import DocxTemplate, InlineImage
+    except ImportError as exc:
+        raise RuntimeError("缺少 docxtpl/jinja2 依赖，请运行 run_app.bat 重新安装 requirements.txt。") from exc
+
+    template = DocxTemplate(str(template_path))
+
+    def image_factory(path: str) -> Any:
+        return InlineImage(template, path, width=Cm(5.25), height=Cm(3.06))
+
+    context = build_transfer_report_context(
+        records=records,
+        stats=stats,
+        title=title,
+        start_date=start_date,
+        end_date=end_date,
+        image_factory=image_factory,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    template.render(context)
+    template.save(output_path)
+    document = Document(str(output_path))
+    _format_transfer_metric_tables(document)
+    document.save(output_path)
+    return output_path
 
 
 def generate_report(
@@ -590,6 +821,16 @@ def generate_report(
 
     if template_path is not None and output_path.resolve() == template_path.resolve():
         raise ValueError("输出文件不能覆盖模板文件，请更换输出文件名或输出目录。")
+    if template_path is not None and _has_transfer_jinja_markers(template_path):
+        return _generate_report_from_jinja_template(
+            records=records,
+            stats=stats,
+            output_path=output_path,
+            title=title,
+            start_date=start_date,
+            end_date=end_date,
+            template_path=template_path,
+        )
 
     document, template_title, template_format, template_sections = _new_document(template_path, style)
 

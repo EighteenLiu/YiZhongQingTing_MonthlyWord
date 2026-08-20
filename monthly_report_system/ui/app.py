@@ -98,19 +98,32 @@ def output_name_for(report_type_key: str, end_date: str, fallback_month: str = "
     return f"西城区{parsed.year}年{parsed.month}月{report_type['output_suffix']}"
 
 
+def date_range_for_report_month(report_month: str) -> tuple[str, str]:
+    """报告月份对应检查周期：上月19日至本月19日。"""
+
+    parsed = datetime.strptime(report_month, "%Y-%m").date()
+    if parsed.month == 1:
+        start = date(parsed.year - 1, 12, 19)
+    else:
+        start = date(parsed.year, parsed.month - 1, 19)
+    end = date(parsed.year, parsed.month, 19)
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
 def default_values() -> dict[str, str]:
     """窗口默认值。"""
 
     report_type = REPORT_TYPES[DEFAULT_REPORT_TYPE]
     report_month = "2026-05"
+    start_date, end_date = date_range_for_report_month(report_month)
     return {
         "report_type": DEFAULT_REPORT_TYPE,
         "title": report_type["title"],
-        "start_date": "2026-04-20",
-        "end_date": "2026-05-19",
+        "start_date": start_date,
+        "end_date": end_date,
         "report_month": report_month,
         "output_dir": str(OUTPUT_DIR),
-        "output_name": output_name_for(DEFAULT_REPORT_TYPE, "2026-05-19", report_month),
+        "output_name": output_name_for(DEFAULT_REPORT_TYPE, end_date, report_month),
     }
 
 
@@ -224,7 +237,8 @@ class MonthlyReportWindow(tk.Tk):
         self.vars["template_path"] = tk.StringVar()
         self.template_label_var = tk.StringVar(value=REPORT_TYPES[DEFAULT_REPORT_TYPE]["template_label"])
         self.nav_buttons: dict[str, ttk.Button] = {}
-        self.vars["report_month"].trace_add("write", lambda *_: self._sync_output_name())
+        self._syncing_report_month = False
+        self.vars["report_month"].trace_add("write", lambda *_: self._sync_dates_from_report_month())
         self.vars["end_date"].trace_add("write", lambda *_: self._sync_output_name())
         self._build_style()
         self._build_ui()
@@ -338,6 +352,24 @@ class MonthlyReportWindow(tk.Tk):
         report_month = self.vars["report_month"].get()
         end_date = self.vars["end_date"].get()
         self.vars["output_name"].set(output_name_for(report_type, end_date, report_month))
+
+    def _sync_dates_from_report_month(self) -> None:
+        if self._syncing_report_month:
+            return
+        report_month = self.vars["report_month"].get().strip()
+        try:
+            start_date, end_date = date_range_for_report_month(report_month)
+        except ValueError:
+            self._sync_output_name()
+            return
+
+        self._syncing_report_month = True
+        try:
+            self.vars["start_date"].set(start_date)
+            self.vars["end_date"].set(end_date)
+        finally:
+            self._syncing_report_month = False
+        self._sync_output_name()
 
     def _build_result(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="生成结果", style="Section.TLabel").pack(anchor=tk.W, pady=(0, 12))

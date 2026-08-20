@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import shutil
+from datetime import date, datetime, time
 from pathlib import Path
+from typing import Iterable
 
 from core.data_cleaner import attach_images_to_records, clean_dataframe
 from core.excel_reader import read_excel_table
@@ -14,7 +17,7 @@ from core.parking_station_report_generator import generate_parking_station_repor
 from core.report_generator import generate_report
 from core.sorting_station_report_generator import generate_sorting_station_report, summarize_sorting_station_records
 from core.statistics import summarize_records
-from utils.file_utils import cleanup_old_run_dirs, create_run_dir, safe_filename, safe_upload_filename
+from utils.file_utils import cleanup_old_run_dirs, cleanup_run_dir, create_run_dir, safe_filename, safe_upload_filename
 from utils.logger import AppLogger
 
 
@@ -69,7 +72,86 @@ def build_preview(records: list[dict], limit: int = 20) -> list[dict]:
     ]
 
 
-def process_report(params: ReportParams, keep_temp: bool = True) -> ProcessingResult:
+def _parse_date_bound(value: str, *, is_end: bool = False) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y年%m月%d日", "%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"):
+        try:
+            parsed = datetime.strptime(text, fmt).date()
+            return datetime.combine(parsed, time.max if is_end else time.min)
+        except ValueError:
+            continue
+    digits = [int(part) for part in re.findall(r"\d+", text)]
+    if len(digits) >= 3:
+        try:
+            parsed = date(digits[0], digits[1], digits[2])
+            return datetime.combine(parsed, time.max if is_end else time.min)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_record_datetime(record: dict) -> datetime | None:
+    raw_values: Iterable[object] = (
+        record.get("check_date"),
+        record.get("raw", {}).get("创建时间"),
+        record.get("raw", {}).get("案件上报时间"),
+        record.get("raw", {}).get("上报时间"),
+        record.get("raw", {}).get("检查时间"),
+        record.get("raw", {}).get("检查日期"),
+    )
+    for value in raw_values:
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, date):
+            return datetime.combine(value, time.min)
+        text = str(value or "").strip()
+        if not text or text.lower() == "nan":
+            continue
+        text = text.split(".")[0]
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S",
+            "%Y/%m/%d %H:%M:%S",
+            "%Y年%m月%d日 %H:%M:%S",
+            "%Y-%m-%d",
+            "%Y/%m/%d",
+            "%Y年%m月%d日",
+        ):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        digits = [int(part) for part in re.findall(r"\d+", text)]
+        if len(digits) >= 3:
+            try:
+                parts = [digits[0], digits[1], digits[2], 0, 0, 0]
+                for index, digit in enumerate(digits[3:6], start=3):
+                    parts[index] = digit
+                return datetime(*parts)
+            except ValueError:
+                continue
+    return None
+
+
+def _filter_records_by_date_range(records: list[dict], start_date: str, end_date: str) -> tuple[list[dict], list[int]]:
+    start = _parse_date_bound(start_date)
+    end = _parse_date_bound(end_date, is_end=True)
+    if start is None or end is None:
+        return records, []
+
+    filtered: list[dict] = []
+    ignored_rows: list[int] = []
+    for record in records:
+        record_dt = _parse_record_datetime(record)
+        if record_dt is not None and not (start <= record_dt <= end):
+            ignored_rows.append(record.get("row_number"))
+            continue
+        filtered.append(record)
+    return filtered, [row for row in ignored_rows if row is not None]
+
+
+def process_report(params: ReportParams, keep_temp: bool = False) -> ProcessingResult:
     """执行完整月报生成流程。"""
 
     _validate_params(params)
@@ -94,18 +176,28 @@ def process_report(params: ReportParams, keep_temp: bool = True) -> ProcessingRe
             image_limit = 3
         clean = clean_dataframe(df, params.report_type)
         logger.extend(clean.warnings)
+        records_for_report = clean.records
+        date_filtered_rows: list[int] = []
+        if params.report_type == "transfer_station":
+            records_for_report, date_filtered_rows = _filter_records_by_date_range(
+                clean.records,
+                params.start_date,
+                params.end_date,
+            )
+            if date_filtered_rows:
+                logger.info(f"已按检查起止日期过滤掉 {len(date_filtered_rows)} 条交投点记录。")
 
         images_by_row, image_warnings = extract_images_by_row(actual_excel_path, run_dir / "images", max_images_per_row=image_limit)
         logger.extend(image_warnings)
 
         variable_image_report = params.report_type in {"parking_station", "kitchen_waste", "sorting_station"}
         records, attach_warnings = attach_images_to_records(
-            clean.records,
+            records_for_report,
             images_by_row,
             max_images_per_record=image_limit,
             warn_on_missing=not variable_image_report,
             warn_on_partial=not variable_image_report,
-            ignored_row_numbers=clean.filtered_row_numbers,
+            ignored_row_numbers=[*clean.filtered_row_numbers, *date_filtered_rows],
         )
         logger.extend(attach_warnings)
 
@@ -129,6 +221,7 @@ def process_report(params: ReportParams, keep_temp: bool = True) -> ProcessingRe
                 end_date=params.end_date,
                 report_month=params.report_month,
                 template_path=template_path,
+                temp_dir=run_dir,
             )
         elif params.report_type == "parking_station":
             generate_parking_station_report(
@@ -166,7 +259,13 @@ def process_report(params: ReportParams, keep_temp: bool = True) -> ProcessingRe
                 )
 
         logger.info(f"Word 月报已生成：{output_path}")
-        logger.info(f"本次临时目录：{run_dir}")
+        cleanup_warning = None if keep_temp else cleanup_run_dir(run_dir)
+        if keep_temp:
+            logger.info(f"本次临时目录：{run_dir}")
+        elif cleanup_warning:
+            logger.warning(cleanup_warning)
+        else:
+            logger.info("本次临时文件已自动清理。")
 
         return ProcessingResult(
             record_count=stats.get("record_count", 0),
@@ -180,9 +279,9 @@ def process_report(params: ReportParams, keep_temp: bool = True) -> ProcessingRe
             logs=logger.messages,
             output_path=output_path,
             report_month=params.report_month,
-            temp_dir=run_dir,
+            temp_dir=run_dir if keep_temp else None,
         )
     except Exception:
         if not keep_temp:
-            shutil.rmtree(run_dir, ignore_errors=True)
+            cleanup_run_dir(run_dir)
         raise

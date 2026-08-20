@@ -26,6 +26,7 @@ KITCHEN_ITEMS = [
 SPECIAL_STATUS_KEYWORDS = [
     "已拆除",
     "已停运",
+    "未运行",
     "停运",
     "停用",
     "锁门",
@@ -36,7 +37,8 @@ SPECIAL_STATUS_KEYWORDS = [
     "无处理设备",
     "暂存点",
 ]
-NO_PROBLEM_TEXTS = {"", "1", "无问题", "无问题。", "正常", "合格", "良好，未发现问题"}
+NO_PROBLEM_TEXTS = {"", "1", "无问题", "无问题。", "未见", "正常", "合格", "良好，未发现问题"}
+NO_PHOTO_PROBLEM_TEXTS = {"未见"}
 DEFAULT_DEPARTMENT = "北京市西城区城市管理委员会"
 DEFAULT_SUMMARY_TEXT = "各点位存在问题，请相关单位尽快完成整改，并将整改情况报送至区城管委固废科。"
 CN_NUMBERS = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]
@@ -228,6 +230,10 @@ def _issue_text(record: Dict[str, Any]) -> str:
     return raw_problem
 
 
+def _should_drop_item_images(record: Dict[str, Any]) -> bool:
+    return _compact(_raw_value(record, "具体问题")) in {_compact(text) for text in NO_PHOTO_PROBLEM_TEXTS}
+
+
 def _append_unique(parts: List[str], value: str) -> None:
     text = value.strip()
     if text and text not in parts:
@@ -259,6 +265,8 @@ def _problem_text(stations: List[Dict[str, Any]]) -> str:
         name = station["name"]
         status = _text(station.get("status_summary"))
         if status:
+            if _is_no_problem_text(status):
+                continue
             status_groups[status].append(name)
             continue
         for item in station.get("items", []):
@@ -272,6 +280,20 @@ def _problem_text(stations: List[Dict[str, Any]]) -> str:
         detail = "；".join(f"{'、'.join(names)}缺少{item}" for item, names in missing_groups.items())
         parts.append(f"运营中的站点存在资料或设施缺失问题，{detail}")
     return "。".join(parts) + ("。" if parts else "未发现明显问题。")
+
+
+def _is_no_problem_text(value: Any) -> bool:
+    return _compact(value) in {_compact(text) for text in NO_PROBLEM_TEXTS}
+
+
+def _is_no_problem_station(station: Dict[str, Any]) -> bool:
+    return not any(item["issues"] or item["images"] for item in station["items"].values())
+
+
+def _sort_collapsed_stations_first(stations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    collapsed = [station for station in stations if station.get("is_collapsed")]
+    expanded = [station for station in stations if not station.get("is_collapsed")]
+    return collapsed + expanded
 
 
 def build_kitchen_waste_context(
@@ -314,7 +336,8 @@ def build_kitchen_waste_context(
             continue
         item = station["items"][item_name]
         item["seen"] = True
-        item["images"].extend(record.get("images", []))
+        if not _should_drop_item_images(record):
+            item["images"].extend(record.get("images", []))
 
         issue = _issue_text(record)
         if issue:
@@ -334,6 +357,20 @@ def build_kitchen_waste_context(
                     "status_summary": status_summary,
                     "status_photo_rows": _photo_rows(station["status_images"], image_factory=image_factory),
                     "items": [],
+                    "is_collapsed": True,
+                }
+            )
+            continue
+
+        if _is_no_problem_station(station):
+            stations.append(
+                {
+                    "name": station["name"],
+                    "display_name": _display_name(station["name"], station["visit_dates"]),
+                    "status_summary": "无问题",
+                    "status_photo_rows": [],
+                    "items": [],
+                    "is_collapsed": True,
                 }
             )
             continue
@@ -358,8 +395,11 @@ def build_kitchen_waste_context(
                     "status_summary": "",
                     "status_photo_rows": [],
                     "items": items,
+                    "is_collapsed": False,
                 }
             )
+
+    stations = _sort_collapsed_stations_first(stations)
 
     return {
         "title": title or "西城区厨余垃圾就地处理检查报告",
@@ -379,7 +419,7 @@ def summarize_kitchen_waste_records(records: List[Dict[str, Any]], report_month:
     context = build_kitchen_waste_context(records, report_month)
     problem_count = 0
     for station in context["stations"]:
-        if station["status_summary"]:
+        if station["status_summary"] and not _is_no_problem_text(station["status_summary"]):
             problem_count += 1
         problem_count += sum(1 for item in station["items"] if item.get("has_issue"))
 

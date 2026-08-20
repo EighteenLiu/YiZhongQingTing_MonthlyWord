@@ -8,6 +8,85 @@ from typing import Optional, Tuple
 from PIL import Image, ImageOps
 
 
+def _clamp_box(box: tuple[int, int, int, int], width: int, height: int) -> tuple[int, int, int, int]:
+    left, top, right, bottom = box
+    return max(0, left), max(0, top), min(width, right), min(height, bottom)
+
+
+def _expand_box_to_aspect(
+    box: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    target_aspect: float,
+) -> tuple[int, int, int, int]:
+    """扩展裁剪框到目标比例，只扩大不压缩，避免裁掉有效内容。"""
+
+    width, height = image_size
+    left, top, right, bottom = box
+    crop_width = max(1, right - left)
+    crop_height = max(1, bottom - top)
+    current_aspect = crop_width / crop_height
+
+    if abs(current_aspect - target_aspect) < 0.01:
+        return _clamp_box(box, width, height)
+
+    if current_aspect < target_aspect:
+        new_width = int(round(crop_height * target_aspect))
+        delta = max(0, new_width - crop_width)
+        left -= delta // 2
+        right += delta - delta // 2
+        if left < 0:
+            right -= left
+            left = 0
+        if right > width:
+            left -= right - width
+            right = width
+    else:
+        new_height = int(round(crop_width / target_aspect))
+        delta = max(0, new_height - crop_height)
+        top -= delta // 2
+        bottom += delta - delta // 2
+        if top < 0:
+            bottom -= top
+            top = 0
+        if bottom > height:
+            top -= bottom - height
+            bottom = height
+
+    return _clamp_box((left, top, right, bottom), width, height)
+
+
+def _trim_white_border(
+    img: Image.Image,
+    target_size: Tuple[int, int],
+    white_threshold: int = 245,
+    margin: int = 4,
+) -> Image.Image:
+    """裁掉图片四周近白边，并把裁剪框扩展回目标比例。
+
+    只裁连续白边；内容区域的比例按目标画布比例扩展，避免后续插入 Word 时变形。
+    """
+
+    rgb = img.convert("RGB")
+    mask = rgb.point(lambda value: 255 if value < white_threshold else 0).convert("L")
+    bbox = mask.getbbox()
+    if bbox is None:
+        return rgb
+
+    width, height = rgb.size
+    left, top, right, bottom = bbox
+    box = _clamp_box((left - margin, top - margin, right + margin, bottom + margin), width, height)
+
+    # 没有明显白边时不处理，避免误裁浅色天空、墙面等真实内容。
+    if box == (0, 0, width, height):
+        return rgb
+
+    target_aspect = target_size[0] / target_size[1]
+    box = _expand_box_to_aspect(box, rgb.size, target_aspect)
+    if box == (0, 0, width, height):
+        return rgb
+    return rgb.crop(box)
+
+
 def save_normalized_image(
     img: Image.Image,
     output_path: Path,
@@ -22,9 +101,10 @@ def save_normalized_image(
         img = img.convert("RGB")
     if img.mode == "L":
         img = img.convert("RGB")
+    img = _trim_white_border(img, target_size)
 
     canvas = Image.new("RGB", target_size, "white")
-    img.thumbnail(target_size, Image.Resampling.LANCZOS, reducing_gap=3.0)
+    img = ImageOps.contain(img, target_size, Image.Resampling.LANCZOS)
     left = (target_size[0] - img.width) // 2
     top = (target_size[1] - img.height) // 2
     canvas.paste(img, (left, top))
